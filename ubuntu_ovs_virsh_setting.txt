@@ -1,0 +1,582 @@
+###################################################################################
+### Open vSwitch VxLAN and  Libvirt setup guide.
+### 2020/08/15 Hitoshi Onozaki
+###################################################################################
+
+apt-get update
+apt-get upgrade
+reboot
+
+apt install openssh-server
+
+apt install vsftpd
+vi /etc/vsftpd.conf
+ ##write -> ON
+
+initctl restart vsftpd
+
+apt install qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virt-manager bridge-utils spice-client
+apt install lib32ncurses5 lib32z1
+apt install openvswitch-switch
+
+
+#Destroy default bridge.
+virsh net-destroy default
+virsh net-autostart --disable default
+virsh net-undefine default
+virsh net-list
+
+#Create OVS bridges.
+ovs-vsctl add-br br100
+ovs-vsctl add-br br101
+ovs-vsctl show
+
+#Create OVS VxLAN tunnels.  192.168.12.40 is itself.
+ovs-vsctl add-port br100 vxlan0 -- set interface vxlan0 type=vxlan options:remote_ip=192.168.12.20 options:key=100
+ovs-vsctl add-port br100 vxlan1 -- set interface vxlan1 type=vxlan options:remote_ip=192.168.12.30 options:key=100
+#ovs-vsctl add-port br100 vxlan2 -- set interface vxlan2 type=vxlan options:remote_ip=192.168.12.40 options:key=100
+ovs-vsctl add-port br100 vxlan3 -- set interface vxlan3 type=vxlan options:remote_ip=192.168.12.50 options:key=100
+
+ovs-vsctl add-port br101 vxlan10 -- set interface vxlan10 type=vxlan options:remote_ip=192.168.12.20 options:key=101
+ovs-vsctl add-port br101 vxlan11 -- set interface vxlan11 type=vxlan options:remote_ip=192.168.12.30 options:key=101
+#ovs-vsctl add-port br101 vxlan12 -- set interface vxlan12 type=vxlan options:remote_ip=192.168.12.40 options:key=101
+ovs-vsctl add-port br101 vxlan13 -- set interface vxlan13 type=vxlan options:remote_ip=192.168.12.50 options:key=101
+ovs-vsctl show
+
+
+##Create OVS physical bridge.
+
+#Show VTEP IF MACADDRESS
+ip a 
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 6c:62:6d:3c:78:8d brd ff:ff:ff:ff:ff:ff
+    inet6 fe80::6e62:6dff:fe3c:788d/64 scope link 
+       valid_lft forever preferred_lft forever
+3: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
+    link/ether 10:6f:3f:ea:e9:81 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.11.18/24 brd 192.168.11.255 scope global wlan0
+       valid_lft forever preferred_lft forever
+    inet6 fe80::126f:3fff:feea:e981/64 scope link 
+       valid_lft forever preferred_lft forever
+5: ovs-system: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1
+    link/ether 66:01:2d:b0:ff:2f brd ff:ff:ff:ff:ff:ff
+6: br100: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1
+    link/ether 46:ad:38:75:ab:4a brd ff:ff:ff:ff:ff:ff
+7: br101: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1
+    link/ether 3a:85:b3:0e:e0:44 brd ff:ff:ff:ff:ff:ff
+8: vxlan_sys_4789: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 65485 qdisc noqueue master ovs-system state UNKNOWN group default qlen 1000
+    link/ether 46:35:0b:fd:f9:70 brd ff:ff:ff:ff:ff:ff
+    inet6 fe80::4435:bff:fefd:f970/64 scope link 
+       valid_lft forever preferred_lft forever
+
+#Add physical bridge. (Userspace memory)
+ovs-vsctl --may-exist add-br br-phy -- set Bridge br-phy datapath_type=netdev -- br-set-external-id br-phy bridge-id br-phy -- set bridge br-phy fail-mode=standalone other_config:hwaddr==***VTEP_ETH_MAC_ADDRESS***
+
+ovs-vsctl add-port br-phy ***VTEP_ETH_IF_NAME***
+
+ip addr add ***VTEP_ETH_IP4_ADDRESS*** dev br-phy
+ip link set br-phy up
+ip addr flush dev ***VTEP_ETH_IF_NAME***
+ip link set ***VTEP_ETH_IF_NAME*** up
+
+#Ex.
+ovs-vsctl --may-exist add-br br-phy -- set Bridge br-phy datapath_type=netdev -- br-set-external-id br-phy bridge-id br-phy -- set bridge br-phy fail-mode=standalone other_config:hwaddr==6c:62:6d:3c:78:8d
+ovs-vsctl add-port br-phy eth0
+
+#Set VTEP.
+ip addr add 192.168.12.40/24 dev br-phy
+ip link set br-phy up
+ip addr flush dev eth0
+ip link set eth0 up
+
+#If fail, following commands delete ip address.
+ip addr del 192.168.12.40/24 dev br-phy
+ip link set br-phy down
+ip addr flush dev eth0
+ip link set eth0 down
+
+
+#Verify ip address.
+ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,PROMISC,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 6c:62:6d:3c:78:8d brd ff:ff:ff:ff:ff:ff
+3: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
+    link/ether 10:6f:3f:ea:e9:81 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.11.18/24 brd 192.168.11.255 scope global wlan0
+       valid_lft forever preferred_lft forever
+    inet6 fe80::126f:3fff:feea:e981/64 scope link 
+       valid_lft forever preferred_lft forever
+4: ovs-system: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1
+    link/ether 66:f3:0a:25:0b:48 brd ff:ff:ff:ff:ff:ff
+5: ovs-netdev: <BROADCAST,PROMISC> mtu 1500 qdisc noop state DOWN group default qlen 1000
+    link/ether 6a:34:4a:37:06:82 brd ff:ff:ff:ff:ff:ff
+6: vxlan_sys_4789: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 65485 qdisc noqueue master ovs-system state UNKNOWN group default qlen 1000
+    link/ether b6:b6:dd:08:ac:e9 brd ff:ff:ff:ff:ff:ff
+    inet6 fe80::b4b6:ddff:fe08:ace9/64 scope link 
+       valid_lft forever preferred_lft forever
+7: br101: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1
+    link/ether a2:e7:71:21:64:40 brd ff:ff:ff:ff:ff:ff
+8: br100: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1
+    link/ether 12:19:5f:42:34:48 brd ff:ff:ff:ff:ff:ff
+9: br-phy: <BROADCAST,PROMISC,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UNKNOWN group default qlen 1000
+    link/ether 6c:62:6d:3c:78:8d brd ff:ff:ff:ff:ff:ff
+    inet 192.168.12.40/24 scope global br-phy
+       valid_lft forever preferred_lft forever
+    inet6 fe80::6e62:6dff:fe3c:788d/64 scope link 
+       valid_lft forever preferred_lft forever
+
+
+#Verify ovs.
+ovs-vsctl show
+384fdc94-1d76-4246-8f9a-79842595e11d
+    Bridge "br101"
+        Port "vxlan10"
+            tag: 101
+            Interface "vxlan10"
+                type: vxlan
+                options: {key="101", remote_ip="192.168.12.20"}
+        Port "vxlan13"
+            tag: 101
+            Interface "vxlan13"
+                type: vxlan
+                options: {key="101", remote_ip="192.168.12.50"}
+        Port "vxlan11"
+            tag: 101
+            Interface "vxlan11"
+                type: vxlan
+                options: {key="101", remote_ip="192.168.12.30"}
+        Port "br101"
+            Interface "br101"
+                type: internal
+    Bridge br-phy
+        fail_mode: standalone
+        Port "eth0"
+            Interface "eth0"
+        Port br-phy
+            Interface br-phy
+                type: internal
+    Bridge "br100"
+        Port "vxlan3"
+            tag: 100
+            Interface "vxlan3"
+                type: vxlan
+                options: {key="100", remote_ip="192.168.12.50"}
+        Port "vxlan0"
+            tag: 100
+            Interface "vxlan0"
+                type: vxlan
+                options: {key="100", remote_ip="192.168.12.20"}
+        Port "vxlan1"
+            tag: 100
+            Interface "vxlan1"
+                type: vxlan
+                options: {key="100", remote_ip="192.168.12.30"}
+        Port "br100"
+            Interface "br100"
+                type: internal
+    ovs_version: "2.5.1"
+
+
+
+cat << 'EOF' > ovsnw100.xml 
+<network>
+  <name>ovs-net100</name>
+  <forward mode='bridge'/>
+  <bridge name='br100'/>
+  <virtualport type='openvswitch'>
+    <parameters interfaceid='09b11c53-8b5c-4eeb-8f00-d84eaa0cc100'/>
+  </virtualport>
+  <portgroup name='PortV100'>
+  </portgroup>
+</network>
+EOF
+
+cat << 'EOF' > ovsnw101.xml 
+<network>
+  <name>ovs-net101</name>
+  <forward mode='bridge'/>
+  <bridge name='br101'/>
+  <virtualport type='openvswitch'>
+    <parameters interfaceid='09b11c53-8b5c-4eeb-8f00-d84eaa0cc101'/>
+  </virtualport>
+  <portgroup name='PortV101'>
+  </portgroup>
+</network>
+EOF
+
+ls ovsnw*.xml
+
+virsh net-define ovsnw100.xml
+virsh net-define ovsnw101.xml 
+virsh net-autostart ovs-net100
+virsh net-autostart ovs-net101
+virsh net-list
+
+virsh net-start ovs-net100
+virsh net-start ovs-net101
+virsh net-list
+
+#If fail, following commands delete network defines.
+virsh net-destroy ovs-ne100
+virsh net-destroy ovs-ne101
+virsh net-undefine ovs-net100
+virsh net-undefine ovs-net101
+
+
+##Create VM.
+cat << 'EOF' > centos6.xml 
+<domain type='kvm'>
+  <name>centos6</name>
+  <uuid>ba396213-1b1e-4763-ba66-4fbf6fed9c10</uuid>
+  <memory unit='KiB'>2097152</memory>
+  <currentMemory unit='KiB'>2097152</currentMemory>
+  <vcpu placement='static'>1</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-i440fx-1.7'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <cpu mode='custom' match='exact' check='partial'>
+    <model fallback='allow'>Penryn</model>
+  </cpu>
+  <clock offset='utc'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <pm>
+    <suspend-to-mem enabled='no'/>
+    <suspend-to-disk enabled='no'/>
+  </pm>
+  <devices>
+    <emulator>/usr/bin/kvm-spice</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='/data/root-work/centos6.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>
+    </disk>
+    <controller type='usb' index='0' model='ich9-ehci1'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x7'/>
+    </controller>
+    <controller type='usb' index='0' model='ich9-uhci1'>
+      <master startport='0'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x0' multifunction='on'/>
+    </controller>
+    <controller type='usb' index='0' model='ich9-uhci2'>
+      <master startport='2'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x1'/>
+    </controller>
+    <controller type='usb' index='0' model='ich9-uhci3'>
+      <master startport='4'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x2'/>
+    </controller>
+    <controller type='pci' index='0' model='pci-root'/>
+    <controller type='virtio-serial' index='0'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x06' function='0x0'/>
+    </controller>
+    <interface type='network'>
+      <mac address='52:54:00:50:40:2e'/>
+      <source network='ovs-net100' portgroup='Port100'/>
+      <model type='rtl8139'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
+    </interface>
+    <interface type='network'>
+      <mac address='52:54:00:af:a0:2d'/>
+      <source network='ovs-net101' portgroup='Port101'/>
+      <model type='rtl8139'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x09' function='0x0'/>
+    </interface>
+    <serial type='pty'>
+      <target type='isa-serial' port='0'>
+        <model name='isa-serial'/>
+      </target>
+    </serial>
+    <console type='pty'>
+      <target type='serial' port='0'/>
+    </console>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+      <address type='virtio-serial' controller='0' bus='0' port='1'/>
+    </channel>
+    <channel type='spicevmc'>
+      <target type='virtio' name='com.redhat.spice.0'/>
+      <address type='virtio-serial' controller='0' bus='0' port='2'/>
+    </channel>
+    <input type='tablet' bus='usb'>
+      <address type='usb' bus='0' port='1'/>
+    </input>
+    <input type='mouse' bus='ps2'/>
+    <input type='keyboard' bus='ps2'/>
+    <graphics type='spice' autoport='yes'>
+      <listen type='address'/>
+      <image compression='off'/>
+    </graphics>
+    <sound model='ich6'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x04' function='0x0'/>
+    </sound>
+    <video>
+      <model type='qxl' ram='65536' vram='65536' vgamem='16384' heads='1' primary='yes'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x02' function='0x0'/>
+    </video>
+    <redirdev bus='usb' type='spicevmc'>
+      <address type='usb' bus='0' port='2'/>
+    </redirdev>
+    <redirdev bus='usb' type='spicevmc'>
+      <address type='usb' bus='0' port='3'/>
+    </redirdev>
+    <memballoon model='virtio'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x08' function='0x0'/>
+    </memballoon>
+  </devices>
+</domain>
+EOF
+
+
+virsh capabilities
+
+# Edit name,uuid,source file(qcow2),mac addresses.
+vi centos6.xml 
+<domain type='kvm'>
+  <name>centos6</name>                                        <------------------ VM NAME
+  <uuid>ba396213-1b1e-4763-ba66-4fbf6fed9c10</uuid>           <------------------ VM uuid. (uuidgen command generates uuid)
+  <memory unit='KiB'>2097152</memory>                         <------------------ Memory size
+  <currentMemory unit='KiB'>2097152</currentMemory>
+  <vcpu placement='static'>1</vcpu>                           <------------------ Number of VCPU
+  <os>
+    <type arch='x86_64' machine='pc-i440fx-1.7'>hvm</type>    <------------------ Mother boad type (virsh capabilities)
+    <boot dev='hd'/>
+  </os>
+...
+  <cpu mode='custom' match='exact' check='partial'>
+    <model fallback='allow'>Penryn</model>                    <------------------ VCPU model (virsh capabilities)
+  </cpu>
+...
+  <devices>
+    <emulator>/usr/bin/kvm-spice</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='/data/root-work/centos6.qcow2'/>          <------------------ VM image file name
+      <target dev='vda' bus='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>
+    </disk>
+...
+    <interface type='network'>
+      <mac address='52:54:00:50:40:2e'/>                      <------------------ vNIC mac address
+      <source network='ovs-net100' portgroup='Port100'/>      <------------------ vNIC bridge and port tyoe
+      <model type='rtl8139'/>                                 <------------------ vNIC virtual device type (If ovs is kernel memory mode, set type='virtio'.)
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/> <------------------ Check slot.
+    </interface>
+    <interface type='network'>
+      <mac address='52:54:00:af:a0:2d'/>                      <------------------ 2nd vNIC
+      <source network='ovs-net101' portgroup='Port101'/>      <------------------
+      <model type='rtl8139'/>                                 <------------------
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x09' function='0x0'/>
+    </interface>
+
+
+virsh define centos6.xml
+
+virsh start centos6
+
+
+#Verify.
+virsh list
+ Id    Name                           State
+----------------------------------------------------
+ 3     centos6                        running
+
+#Verify.   Libvirt adds "vnet0" and "vnet1" automatically while VM booting.
+ovs-vsctl show
+384fdc94-1d76-4246-8f9a-79842595e11d
+    Bridge "br101"
+        Port "vnet1"
+            Interface "vnet1"
+        Port "br101"
+            Interface "br101"
+                type: internal
+        Port "vxlan11"
+            Interface "vxlan11"
+                type: vxlan
+                options: {key="101", remote_ip="192.168.12.30"}
+        Port "vxlan10"
+            Interface "vxlan10"
+                type: vxlan
+                options: {key="101", remote_ip="192.168.12.20"}
+        Port "vxlan13"
+            Interface "vxlan13"
+                type: vxlan
+                options: {key="101", remote_ip="192.168.12.50"}
+    Bridge "br100"
+        Port "br100"
+            Interface "br100"
+                type: internal
+        Port "vxlan3"
+            Interface "vxlan3"
+                type: vxlan
+                options: {key="100", remote_ip="192.168.12.50"}
+        Port "vxlan1"
+            Interface "vxlan1"
+                type: vxlan
+                options: {key="100", remote_ip="192.168.12.30"}
+        Port "vnet0"
+            Interface "vnet0"
+        Port "vxlan0"
+            Interface "vxlan0"
+                type: vxlan
+                options: {key="100", remote_ip="192.168.12.20"}
+    Bridge br-phy
+        fail_mode: standalone
+        Port "eth0"
+            Interface "eth0"
+        Port br-phy
+            Interface br-phy
+                type: internal
+    ovs_version: "2.5.1"
+
+
+
+ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,PROMISC,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 6c:62:6d:3c:78:8d brd ff:ff:ff:ff:ff:ff
+3: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
+    link/ether 10:6f:3f:ea:e9:81 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.11.18/24 brd 192.168.11.255 scope global wlan0
+       valid_lft forever preferred_lft forever
+    inet6 fe80::126f:3fff:feea:e981/64 scope link 
+       valid_lft forever preferred_lft forever
+4: ovs-system: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1
+    link/ether 66:f3:0a:25:0b:48 brd ff:ff:ff:ff:ff:ff
+5: ovs-netdev: <BROADCAST,PROMISC> mtu 1500 qdisc noop state DOWN group default qlen 1000
+    link/ether 6a:34:4a:37:06:82 brd ff:ff:ff:ff:ff:ff
+6: vxlan_sys_4789: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 65485 qdisc noqueue master ovs-system state UNKNOWN group default qlen 1000
+    link/ether b6:b6:dd:08:ac:e9 brd ff:ff:ff:ff:ff:ff
+    inet6 fe80::b4b6:ddff:fe08:ace9/64 scope link 
+       valid_lft forever preferred_lft forever
+7: br101: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1
+    link/ether a2:e7:71:21:64:40 brd ff:ff:ff:ff:ff:ff
+8: br100: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1
+    link/ether 12:19:5f:42:34:48 brd ff:ff:ff:ff:ff:ff
+9: br-phy: <BROADCAST,PROMISC,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UNKNOWN group default qlen 1000
+    link/ether 6c:62:6d:3c:78:8d brd ff:ff:ff:ff:ff:ff
+    inet 192.168.12.40/24 scope global br-phy
+       valid_lft forever preferred_lft forever
+    inet6 fe80::6e62:6dff:fe3c:788d/64 scope link 
+       valid_lft forever preferred_lft forever
+10: vnet0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast master ovs-system state UNKNOWN group default qlen 1000
+    link/ether fe:54:00:50:40:2e brd ff:ff:ff:ff:ff:ff
+    inet6 fe80::fc54:ff:fe50:402e/64 scope link 
+       valid_lft forever preferred_lft forever
+11: vnet1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast master ovs-system state UNKNOWN group default qlen 1000
+    link/ether fe:54:00:af:a0:2d brd ff:ff:ff:ff:ff:ff
+    inet6 fe80::fc54:ff:feaf:a02d/64 scope link 
+       valid_lft forever preferred_lft forever
+
+
+
+## Attach SPICE Client to VM.
+virsh list
+
+virsh domdisplay centos6
+#spice://localhost:5900
+
+spicec -h 127.0.0.1 -p 5900 &
+
+# Set VM netowork interfaces. (Cnetos6 VM)
+vi /etc/udev/rules.d/70-persistent-net.rules
+-->Delete auto-generated lines.
+
+vi /etc/sysconfig/network-scripts/ifcfg-eth0
+-->Edit IP4.
+
+vi /etc/sysconfig/network-scripts/ifcfg-eth1
+-->Edit IP4.
+
+reboot
+
+ifconfig
+
+
+
+
+## Edit startup scripts. (/etc/rc.local)
+vi /etc/rc.local
+ip addr add 192.168.12.40/24 dev br-phy
+ip link set br-phy up
+ip addr flush dev eth0
+ip link set eth0 up
+ip link set eth0 mtu 4000
+
+ip link set br-phy mtu 4000
+ip link set br100 mtu 4000
+ip link set br101 mtu 4000
+ip link set ovs-system mtu 4000
+ip link set ovs-netdev mtu 4000
+
+
+## Show mac addresses.
+ip nei
+ovs-appctl dpif/show
+ovs-appctl fdb/show br100
+ovs-appctl fdb/show br101
+
+
+###################################################################################
+#### KERNEL MODE ####
+###################################################################################
+ip addr del ***VTEP_ETH_IP4_ADDRESS*** dev br-phy
+ip link set br-phy down
+ip addr flush dev ***VTEP_ETH_IF_NAME***
+ip link set ***VTEP_ETH_IF_NAME*** down
+
+ovs-vsctl del-port ***VTEP_ETH_IF_NAME***
+ovs-vsctl del-br br-phy
+ovs-vsctl show
+service openvswitch-switch restart
+ovs-vsctl show
+ip a
+
+#Add physical bridge. (Kernel memory)
+ovs-vsctl --may-exist add-br br-phy -- br-set-external-id br-phy bridge-id br-phy -- set bridge br-phy fail-mode=standalone other_config:hwaddr==***VTEP_ETH_MAC_ADDRESS***
+
+ovs-vsctl add-port br-phy ***VTEP_ETH_IF_NAME***
+
+ip addr add ***VTEP_ETH_IP4_ADDRESS*** dev br-phy
+ip link set br-phy up
+ip addr flush dev ***VTEP_ETH_IF_NAME***
+ip link set ***VTEP_ETH_IF_NAME*** up
+
+
+virsh undefine centos6
+Edit centos6.xml.
+  <model type='rtl8139'/>  <------------------ 'virtio'
+
+virsh define centos6.xml
+virsh start  centos6
+
+
+
